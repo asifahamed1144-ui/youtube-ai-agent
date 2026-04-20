@@ -1,0 +1,229 @@
+import os
+import json
+import re
+import requests
+from datetime import datetime
+from openai import OpenAI
+from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip
+from PIL import Image
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+MEMORY_FILE = "memory.json"
+
+# =========================
+# LOAD MEMORY
+# =========================
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {
+            "meta": {"version": "1.0"},
+            "videos": [],
+            "learned_patterns": {}
+        }
+    with open(MEMORY_FILE, "r") as f:
+        return json.load(f)
+
+def save_memory(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+memory = load_memory()
+
+# =========================
+# STEP 1: LEARN FROM MEMORY
+# =========================
+learning_prompt = f"""
+You are a YouTube growth AI.
+
+Analyze past performance:
+
+{json.dumps(memory, indent=2)}
+
+Return:
+- best title style
+- best hook style
+- best story structure
+- mistakes to avoid
+- improvement strategy
+"""
+
+strategy = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": learning_prompt}]
+).choices[0].message.content
+
+print("🧠 STRATEGY:\n", strategy)
+
+# =========================
+# STEP 2: VIRAL IDEA
+# =========================
+idea_prompt = f"""
+Based on this strategy:
+{strategy}
+
+Generate ONE viral kids YouTube Shorts idea.
+
+Output:
+Topic:
+Hook:
+Emotion:
+"""
+
+idea = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": idea_prompt}]
+).choices[0].message.content
+
+print("🔥 IDEA:\n", idea)
+
+# =========================
+# STEP 3: VIDEO CONTENT
+# =========================
+content_prompt = f"""
+Create viral kids YouTube video.
+
+Based on:
+{idea}
+
+Output STRICT FORMAT:
+
+Title:
+Story (50–100 words):
+Scenes:
+1...
+2...
+3...
+4...
+5...
+Image Prompts:
+1...
+2...
+3...
+4...
+5...
+Thumbnail Idea:
+"""
+
+content = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": content_prompt}]
+).choices[0].message.content
+
+print("🎬 CONTENT READY")
+
+# =========================
+# PARSE CONTENT
+# =========================
+def extract(text, key):
+    return text.split(key)[1]
+
+title = extract(content, "Title:").split("Story")[0].strip()
+story = extract(content, "Story").split("Scenes")[0].strip()
+
+img_block = extract(content, "Image Prompts")
+image_prompts = [
+    re.sub(r"^\d+[\.\)]\s*", "", l).strip()
+    for l in img_block.split("\n") if l.strip()
+]
+
+# =========================
+# STEP 4: VIRAL SCORE PREDICTION
+# =========================
+score_prompt = f"""
+Predict viral score 0-100.
+
+Title: {title}
+Strategy: {strategy}
+
+Return only number.
+"""
+
+score = int(re.findall(
+    r"\d+",
+    client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": score_prompt}]
+    ).choices[0].message.content
+)[0])
+
+print("📊 VIRAL SCORE:", score)
+
+# =========================
+# STEP 5: VOICE GENERATION
+# =========================
+voice_script = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{
+        "role": "user",
+        "content": f"Convert into cinematic narration with emotion and pauses:\n{story}"
+    }]
+).choices[0].message.content
+
+speech = client.audio.speech.create(
+    model="gpt-4o-mini-tts",
+    voice="alloy",
+    input=voice_script
+)
+
+with open("voice.mp3", "wb") as f:
+    f.write(speech.read())
+
+# =========================
+# STEP 6: IMAGES
+# =========================
+images = []
+
+for i, p in enumerate(image_prompts):
+    res = client.images.generate(
+        model="gpt-image-1",
+        prompt=p + ", Pixar style, cinematic lighting, ultra detailed",
+        size="1024x1024"
+    )
+
+    url = res.data[0].url
+    img = requests.get(url).content
+
+    file = f"scene_{i}.png"
+    open(file, "wb").write(img)
+    images.append(file)
+
+# =========================
+# STEP 7: VIDEO
+# =========================
+audio = AudioFileClip("voice.mp3")
+duration = audio.duration / len(images)
+
+clips = [ImageClip(i).set_duration(duration) for i in images]
+
+video = concatenate_videoclips(clips)
+video = video.set_audio(audio)
+
+video.write_videofile("final_video.mp4", fps=24, codec="libx264")
+
+print("🎬 VIDEO CREATED")
+
+# =========================
+# STEP 8: UPDATE MEMORY (SELF-LEARNING)
+# =========================
+memory["videos"].append({
+    "id": f"vid_{len(memory['videos'])+1}",
+    "title": title,
+    "topic": idea,
+    "score_prediction": score,
+    "real_views": 0,
+    "ctr": 0,
+    "watch_time": 0,
+    "created_at": str(datetime.now())
+})
+
+# Update learned pattern dynamically
+if score > 80:
+    memory["learned_patterns"]["winning_style"] = "emotional + fast hook + strong visuals"
+
+if score < 60:
+    memory["learned_patterns"]["fix_needed"] = "improve first 3 seconds hook"
+
+save_memory(memory)
+
+print("💾 MEMORY UPDATED → SELF-LEARNING COMPLETE")
