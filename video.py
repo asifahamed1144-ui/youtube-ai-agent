@@ -1,24 +1,52 @@
+from openai import OpenAI
 from gtts import gTTS
 from moviepy.editor import *
 from PIL import Image, ImageDraw
+import requests
+import os
 
-# Story from your agent
-story = """Milo was a small monkey who loved bananas. One day, he saw a bunch hanging high in a tree. Big animals tried but failed. Milo used a log, climbed up, got the bananas, and shared them. Moral: Think wisely and share happily."""
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Convert story to voice
+# ---------------- STEP 1: GET STORY FROM AGENT ----------------
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{
+        "role": "user",
+        "content": """
+        Generate a kids story (50-80 words).
+        Use simple English.
+        Add a moral at the end.
+        """
+    }]
+)
+
+story = response.choices[0].message.content
+print("STORY:\n", story)
+
+# ---------------- STEP 2: VOICE ----------------
 tts = gTTS(story)
 tts.save("voice.mp3")
 
-# Create simple image
-img = Image.new('RGB', (1280, 720), color='green')
-draw = ImageDraw.Draw(img)
-draw.text((50, 300), "Milo the Clever Monkey 🐵", fill="white")
+# ---------------- STEP 3: GENERATE IMAGE FROM STORY ----------------
+img_prompt = f"cute cartoon scene based on: {story}, Pixar style, bright colors"
 
-img.save("scene.png")
+image = client.images.generate(
+    model="gpt-image-1",
+    prompt=img_prompt,
+    size="1024x1024"
+)
 
-# Create video
+image_url = image.data[0].url
+img_data = requests.get(image_url).content
+
+with open("scene.png", "wb") as f:
+    f.write(img_data)
+
+# ---------------- STEP 4: VIDEO ----------------
 image_clip = ImageClip("scene.png").set_duration(10)
 audio_clip = AudioFileClip("voice.mp3")
 
 video = image_clip.set_audio(audio_clip)
 video.write_videofile("output.mp4", fps=24)
+
+print("🎬 VIDEO CREATED: output.mp4")
