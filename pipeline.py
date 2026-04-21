@@ -1,196 +1,133 @@
-import os
-import re
-import requests
 from openai import OpenAI
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip
-from PIL import Image
+from moviepy.editor import *
+import requests
+import os
+import json
+from PIL import Image, ImageDraw
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# =========================
-# STEP 0: CHAT HISTORY INPUT
-# =========================
-# 👉 Paste Warp / agent / previous conversation here
-CHAT_HISTORY = """
-User: make a kids story about space monkey
-Assistant: ...
-User: make it more emotional and cinematic
-Assistant: ...
-"""
+OUTPUT_DIR = "generated_story_video"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# =========================
-# STEP 1: GENERATE STORY
-# =========================
-PROMPT = f"""
-You are a viral YouTube kids story creator.
-
-Use this chat history:
-{CHAT_HISTORY}
-
-Now generate:
-
-Title:
-...
-
-Story:
-(engaging, emotional, kid-friendly)
-
-Scenes:
-1. ...
-2. ...
-3. ...
-4. ...
-5. ...
-
-Image Prompts:
-1. ...
-2. ...
-3. ...
-4. ...
-5. ...
-
-Thumbnail Idea:
-...
-"""
-
+# ---------------- STEP 1: GENERATE STORY + HOOK + SCENES ----------------
 response = client.chat.completions.create(
     model="gpt-4o-mini",
-    messages=[{"role": "user", "content": PROMPT}]
+    messages=[{
+        "role": "user",
+        "content": """
+        Find a trending kids topic and generate:
+
+        1. Title
+        2. Hook (very engaging first 2 seconds)
+        3. Story (60-100 words, simple English, moral)
+        4. 5 short scenes (1 line each)
+
+        Return JSON:
+        {
+          "title": "...",
+          "hook": "...",
+          "story": "...",
+          "scenes": ["...", "...", "..."]
+        }
+        """
+    }]
 )
 
 content = response.choices[0].message.content
-print("\n=== AI OUTPUT ===\n", content)
+content = content.strip().replace("```json", "").replace("```", "")
+data = json.loads(content)
 
-# =========================
-# STEP 2: EXTRACT STORY
-# =========================
-def extract_block(text, start, end=None):
-    part = text.split(start, 1)
-    if len(part) < 2:
-        raise ValueError(f"{start} not found in AI output")
+title = data["title"]
+hook = data["hook"]
+story = data["story"]
+scenes = data["scenes"]
 
-    result = part[1]
-    if end and end in result:
-        result = result.split(end, 1)[0]
+print("TITLE:", title)
+print("HOOK:", hook)
+print("STORY:", story)
 
-    return result.strip()
+# ---------------- SAVE STORY ----------------
+with open(f"{OUTPUT_DIR}/story.txt", "w") as f:
+    f.write(story)
 
-story = extract_block(content, "Story:", "Scenes:")
+# ---------------- STEP 2: BETTER VOICE ----------------
+audio_response = client.audio.speech.create(
+    model="gpt-4o-mini-tts",
+    voice="alloy",
+    input=story
+)
 
-# =========================
-# STEP 3: IMAGE PROMPTS
-# =========================
-def extract_list(text, header):
-    block = extract_block(text, header)
-    lines = block.split("\n")
+voice_path = f"{OUTPUT_DIR}/voice.mp3"
+with open(voice_path, "wb") as f:
+    f.write(audio_response.content)
 
-    prompts = []
-    for line in lines:
-        line = line.strip()
-        if line:
-            clean = re.sub(r"^\d+[\.\)]\s*", "", line)
-            prompts.append(clean)
+# ---------------- STEP 3: GENERATE IMAGES ----------------
+image_paths = []
 
-    return prompts
+for i, scene in enumerate(scenes):
+    prompt = f"""
+    Cute cartoon kids illustration, Pixar style, bright colors, 3D render.
+    Scene: {scene}
+    Same main character in all scenes.
+    """
 
-image_prompts = extract_list(content, "Image Prompts:")
-
-if len(image_prompts) < 3:
-    raise ValueError("Image prompts not generated properly")
-
-# =========================
-# STEP 4: GENERATE IMAGES
-# =========================
-images = []
-
-for i, prompt in enumerate(image_prompts):
-    enhanced_prompt = (
-        prompt +
-        ", Pixar style, cinematic lighting, ultra detailed, 3D animation, vibrant colors"
-    )
-
-    result = client.images.generate(
+    image = client.images.generate(
         model="gpt-image-1",
-        prompt=enhanced_prompt,
+        prompt=prompt,
         size="1024x1024"
     )
 
-    image_url = result.data[0].url
-    img_data = requests.get(image_url).content
+    url = image.data[0].url
+    img_data = requests.get(url).content
 
-    filename = f"scene_{i}.png"
-    with open(filename, "wb") as f:
+    path = f"{OUTPUT_DIR}/scene_{i+1}.png"
+    with open(path, "wb") as f:
         f.write(img_data)
 
-    images.append(filename)
+    image_paths.append(path)
 
-print("✅ Images generated")
+print("✅ Images created")
 
-# =========================
-# STEP 5: UPSCALE
-# =========================
-def upscale_to_4k(path):
-    img = Image.open(path)
-    img = img.resize((3840, 2160))
-    img.save(path)
+# ---------------- STEP 4: CREATE HOOK SCREEN ----------------
+hook_img = Image.new("RGB", (1080, 1920), color="black")
+draw = ImageDraw.Draw(hook_img)
 
-for img in images:
-    upscale_to_4k(img)
+draw.text((100, 900), hook, fill="white")
 
-print("✅ Upscaled")
+hook_path = f"{OUTPUT_DIR}/hook.png"
+hook_img.save(hook_path)
 
-# =========================
-# STEP 6: MAKE VOICE SCRIPT (IMPORTANT UPGRADE)
-# =========================
-VOICE_PROMPT = f"""
-Convert this story into a professional YouTube narration script.
+# ---------------- STEP 5: CREATE VIDEO (VERTICAL SHORTS) ----------------
+clips = []
 
-Rules:
-- emotional storytelling
-- natural speaking rhythm
-- pauses like (...)
-- very engaging for kids
-- cinematic tone
+# Hook first
+hook_clip = ImageClip(hook_path).set_duration(2)
+clips.append(hook_clip)
 
-Story:
-{story}
-"""
+# Scene clips
+for img in image_paths:
+    clip = (
+        ImageClip(img)
+        .resize(height=1920)
+        .set_duration(3)
+        .set_position("center")
+        .on_color(size=(1080, 1920), color=(0, 0, 0))
+    )
+    clips.append(clip)
 
-voice_script = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": VOICE_PROMPT}]
-).choices[0].message.content
+video = concatenate_videoclips(clips, method="compose")
 
-# =========================
-# STEP 7: OPENAI TTS (BETTER VOICE)
-# =========================
-speech = client.audio.speech.create(
-    model="gpt-4o-mini-tts",
-    voice="alloy",   # try: alloy, verse, coral, sage
-    input=voice_script
-)
-
-with open("voice.mp3", "wb") as f:
-    f.write(speech.read())
-
-print("✅ Voice generated (OpenAI TTS)")
-
-# =========================
-# STEP 8: CREATE VIDEO
-# =========================
-audio = AudioFileClip("voice.mp3")
-duration = audio.duration / len(images)
-
-clips = [ImageClip(img).set_duration(duration) for img in images]
-
-video = concatenate_videoclips(clips)
+audio = AudioFileClip(voice_path)
 video = video.set_audio(audio)
 
+output_video = f"{OUTPUT_DIR}/final_shorts.mp4"
+
 video.write_videofile(
-    "final_video.mp4",
+    output_video,
     fps=24,
     codec="libx264",
     bitrate="8000k"
 )
 
-print("🎬 FINAL VIDEO READY")
+print("🎬 VIDEO CREATED:", output_video)
