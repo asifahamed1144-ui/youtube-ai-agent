@@ -3,131 +3,165 @@ from moviepy.editor import *
 import requests
 import os
 import json
-from PIL import Image, ImageDraw
+import time
+import traceback
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
+# ---------------- CONFIG ----------------
 OUTPUT_DIR = "generated_story_video"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------------- STEP 1: GENERATE STORY + HOOK + SCENES ----------------
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{
-        "role": "user",
-        "content": """
-        Find a trending kids topic and generate:
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-        1. Title
-        2. Hook (very engaging first 2 seconds)
-        3. Story (60-100 words, simple English, moral)
-        4. 5 short scenes (1 line each)
+# ---------------- RETRY FUNCTION ----------------
+def retry(func, retries=3, delay=3):
+    for attempt in range(retries):
+        try:
+            return func()
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt+1} failed:", e)
+            time.sleep(delay)
+    print("❌ All retries failed")
+    exit()
 
-        Return JSON:
-        {
-          "title": "...",
-          "hook": "...",
-          "story": "...",
-          "scenes": ["...", "...", "..."]
-        }
-        """
-    }]
-)
+# ---------------- SAFE JSON PARSER ----------------
+def safe_json_parse(text):
+    text = text.strip().replace("```json", "").replace("```", "")
+    try:
+        return json.loads(text)
+    except Exception as e:
+        print("❌ JSON ERROR:", e)
+        print(text)
+        exit()
 
-content = response.choices[0].message.content
-content = content.strip().replace("```json", "").replace("```", "")
-data = json.loads(content)
+# ---------------- MAIN PIPELINE ----------------
+try:
+    print("🚀 Starting pipeline...")
 
-title = data["title"]
-hook = data["hook"]
-story = data["story"]
-scenes = data["scenes"]
+    # ---------------- STEP 1: GENERATE STORY ----------------
+    def generate_story():
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": """
+Return ONLY valid JSON. No explanation.
 
-print("TITLE:", title)
-print("HOOK:", hook)
-print("STORY:", story)
+{
+  "title": "string",
+  "story": "string",
+  "scenes": ["scene1", "scene2", "scene3", "scene4", "scene5"]
+}
 
-# ---------------- SAVE STORY ----------------
-with open(f"{OUTPUT_DIR}/story.txt", "w") as f:
-    f.write(story)
+Create a kids story with moral.
+"""
+            }]
+        )
+        return response.choices[0].message.content
 
-# ---------------- STEP 2: BETTER VOICE ----------------
-audio_response = client.audio.speech.create(
-    model="gpt-4o-mini-tts",
-    voice="alloy",
-    input=story
-)
+    content = retry(generate_story)
+    data = safe_json_parse(content)
 
-voice_path = f"{OUTPUT_DIR}/voice.mp3"
-with open(voice_path, "wb") as f:
-    f.write(audio_response.content)
+    title = data["title"]
+    story = data["story"]
+    scenes = data["scenes"]
 
-# ---------------- STEP 3: GENERATE IMAGES ----------------
-image_paths = []
+    print("✅ TITLE:", title)
+    print("✅ STORY:", story)
 
-for i, scene in enumerate(scenes):
-    prompt = f"""
-    Cute cartoon kids illustration, Pixar style, bright colors, 3D render.
-    Scene: {scene}
-    Same main character in all scenes.
-    """
+    # Save story
+    with open(f"{OUTPUT_DIR}/story.txt", "w") as f:
+        f.write(story)
 
-    image = client.images.generate(
-        model="gpt-image-1",
-        prompt=prompt,
-        size="1024x1024"
-    )
+    # ---------------- STEP 2: GENERATE VOICE ----------------
+    def generate_voice():
+        audio = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=story
+        )
 
-    url = image.data[0].url
-    img_data = requests.get(url).content
+        path = f"{OUTPUT_DIR}/voice.mp3"
+        with open(path, "wb") as f:
+            f.write(audio.content)
 
-    path = f"{OUTPUT_DIR}/scene_{i+1}.png"
-    with open(path, "wb") as f:
-        f.write(img_data)
+        return path
 
-    image_paths.append(path)
+    voice_path = retry(generate_voice)
+    print("✅ Voice created")
 
-print("✅ Images created")
+    # ---------------- STEP 3: GENERATE IMAGES ----------------
+    image_paths = []
 
-# ---------------- STEP 4: CREATE HOOK SCREEN ----------------
-hook_img = Image.new("RGB", (1080, 1920), color="black")
-draw = ImageDraw.Draw(hook_img)
+    for i, scene in enumerate(scenes):
 
-draw.text((100, 900), hook, fill="white")
+        def generate_image():
+            prompt = f"""
+            Cute cartoon kids illustration, Pixar style, bright colors, 3D render.
+            Scene: {scene}
+            Same main character in all scenes.
+            """
 
-hook_path = f"{OUTPUT_DIR}/hook.png"
-hook_img.save(hook_path)
+            image = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                size="1024x1024"
+            )
 
-# ---------------- STEP 5: CREATE VIDEO (VERTICAL SHORTS) ----------------
-clips = []
+            url = image.data[0].url
+            img_data = requests.get(url).content
 
-# Hook first
-hook_clip = ImageClip(hook_path).set_duration(2)
-clips.append(hook_clip)
+            path = f"{OUTPUT_DIR}/scene_{i+1}.png"
+            with open(path, "wb") as f:
+                f.write(img_data)
 
-# Scene clips
-for img in image_paths:
-    clip = (
-        ImageClip(img)
-        .resize(height=1920)
-        .set_duration(3)
-        .set_position("center")
-        .on_color(size=(1080, 1920), color=(0, 0, 0))
-    )
-    clips.append(clip)
+            return path
 
-video = concatenate_videoclips(clips, method="compose")
+        path = retry(generate_image)
+        image_paths.append(path)
 
-audio = AudioFileClip(voice_path)
-video = video.set_audio(audio)
+    print("✅ Images generated")
 
-output_video = f"{OUTPUT_DIR}/final_shorts.mp4"
+    # ---------------- STEP 4: CREATE VIDEO (VERTICAL SHORTS) ----------------
+    def create_video():
+        clips = []
 
-video.write_videofile(
-    output_video,
-    fps=24,
-    codec="libx264",
-    bitrate="8000k"
-)
+        for img in image_paths:
+            clip = (
+                ImageClip(img)
+                .resize(height=1920)
+                .set_duration(3)
+                .set_position("center")
+                .on_color(size=(1080, 1920), color=(0, 0, 0))
+            )
+            clips.append(clip)
 
-print("🎬 VIDEO CREATED:", output_video)
+        video = concatenate_videoclips(clips, method="compose")
+
+        audio = AudioFileClip(voice_path)
+        video = video.set_audio(audio)
+
+        output_video = f"{OUTPUT_DIR}/final_shorts.mp4"
+
+        video.write_videofile(
+            output_video,
+            fps=24,
+            codec="libx264",
+            bitrate="8000k"
+        )
+
+        return output_video
+
+    output_video = retry(create_video)
+
+    # ---------------- FINAL CHECK ----------------
+    if os.path.exists(output_video):
+        print("🎉 SUCCESS: Video created!")
+        print("📂 LOCATION:", os.path.abspath(output_video))
+    else:
+        print("❌ ERROR: Video not found")
+
+# ---------------- ERROR HANDLING ----------------
+except Exception as e:
+    print("❌ PIPELINE FAILED:")
+    print(e)
+    traceback.print_exc()
